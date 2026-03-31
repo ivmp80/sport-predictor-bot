@@ -1,16 +1,41 @@
-import asyncio
 import logging
-from datetime import datetime
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+import os
+from contextlib import asynccontextmanager
+from http import HTTPStatus
 
-# Вставь свой токен прямо сюда
-TOKEN = "8785410240:AAEzceP8n6AYhgA6Sv5t32Ha8jPgH2MFFa8"  # ← ЗАМЕНИ НА СВОЙ ТОКЕН
+from fastapi import FastAPI, Request, Response
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# Подключаем базу
 import database
 
-# ----------------- Настройка логирования -----------------
+# =========================
+# НАСТРОЙКИ
+# =========================
+
+TOKEN = "8785410240:AAEzceP8n6AYhgA6Sv5t32Ha8jPgH2MFFa8"  # <-- вставь свой токен
+ADMIN_ID = 396415558  # <-- вставь свой Telegram user_id
+
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+PORT = int(os.environ.get("PORT", "10000"))
+
+if not RENDER_EXTERNAL_URL:
+    raise ValueError("Не найдена переменная окружения RENDER_EXTERNAL_URL")
+
+WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}/telegram"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -18,40 +43,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Создаем Telegram Application без polling/updater
+ptb = Application.builder().token(TOKEN).updater(None).build()
 
-# ----------------- Команда /start -----------------
+
+# =========================
+# КОМАНДЫ БОТА
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    await update.message.reply_text(
-        f"Привет, {user.first_name}!\n"
-        "Сейчас я буду ботом для спортивных прогнозов.\n"
-        "Точные счета вводятся через кнопки.\n"
-        "Пока прогнозы скрыты, пока админ не нажнёт, что приём закрыт."
-    )
+    if update.message:
+        await update.message.reply_text(
+            f"Привет, {user.first_name}!\n"
+            "Я бот для спортивных прогнозов.\n"
+            "Ставки принимаются скрытно до закрытия приема."
+        )
 
-
-# ----------------- Команда /add_match (для админа) -----------------
-
-ADMIN_ID = 396415558  # ← ЗАМЕНИ НА СВОЙ user_id из Telegram (можно узнать через @userinfobot)
 
 async def cmd_add_match(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-
     if user.id != ADMIN_ID:
         await update.message.reply_text("Эта команда только для администратора.")
         return
 
     context.user_data["step"] = "await_match_name"
     await update.message.reply_text(
-        "Введи название матча, например:\n«Россия – Чехия, хоккей»"
+        "Введи название матча, например:\nРоссия – Чехия, хоккей"
     )
 
 
 async def handle_match_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    text = update.message.text.strip()
+    if not update.message:
+        return
 
+    text = update.message.text.strip()
     step = context.user_data.get("step")
 
     if step == "await_match_name":
@@ -60,106 +86,105 @@ async def handle_match_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "Выбери вид спорта:\n1 – футбол\n2 – хоккей"
         )
-    elif step == "await_sport_type":
+        return
+
+    if step == "await_sport_type":
         sport_map = {"1": "football", "2": "hockey"}
         sport_type = sport_map.get(text)
+
         if not sport_type:
             await update.message.reply_text("Выбери 1 или 2.")
             return
 
         context.user_data["sport_type"] = sport_type
         context.user_data["step"] = "await_start_time"
+        await update.message.reply_text(
+            "Введи дату и время в формате:\n2026-03-31 20:00"
+        )
+        return
+
+    if step == "await_start_time":
+        name = context.user_data.get("match_name")
+        sport_type = context.user_data.get("sport_type")
+
+        match_id = database.add_match(name, sport_type, text)
+
+        context.user_data.clear()
 
         await update.message.reply_text(
-            "Введи дату и время в формате ГГГГ-ММ-ДД ЧЧ:ММ, например:\n2026-03-31 20:00"
+            f"✅ Матч добавлен.\nID: {match_id}\n{name}\n{text}"
         )
-    elif step == "await_start_time":
-        start_time_str = text
-        # Можно добавить валидацию, но пока упростим
-        try:
-            dt = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
-        except ValueError:
-            await update.message.reply_text(
-                "Неверный формат. Используй пример:\n2026-03-31 20:00"
-            )
-            return
+        return
 
-        name = context.user_data["match_name"]
-        sport_type = context.user_data["sport_type"]
-        id = database.add_match(name, sport_type, start_time_str)
-        # Очистим шаг
-        context.user_data.pop("step", None)
-
-        await update.message.reply_text(
-            f"✅ Матч добавлен (ID={id}):\n{name}\nВремя: {start_time_str}"
-        )
-
-
-# ----------------- Публикация матчей в чате -----------------
 
 async def cmd_list_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     matches = database.get_matches_open()
+
     if not matches:
         await update.message.reply_text("Сейчас нет открытых матчей.")
         return
 
-    text = "Спортивный день:\n\n"
+    text = "Матчи для прогнозов:\n\n"
     keyboard_buttons = []
 
     for match in matches:
-        line = f"{match['id']}. {match['name']} — {match['start_time']}"
-        text += line + "\n"
+        text += f"{match['id']}. {match['name']} — {match['start_time']}\n"
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                f"Ставка на матч {match['id']}",
+                callback_data=f"bet_match_{match['id']}"
+            )
+        ])
 
-        btn = InlineKeyboardButton(
-            f"Ставка на матч {match['id']}",
-            callback_data=f"bet_match_{match['id']}"
-        )
-        keyboard_buttons.append([btn])
-
-    # Кнопка закрыть приём (только для админа)
     if update.effective_user.id == ADMIN_ID:
-        keyboard_buttons.append(
-            [InlineKeyboardButton("🔒 Закрыть приём прогнозов", callback_data="admin_close")]
-        )
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                "🔒 Закрыть приём прогнозов",
+                callback_data="admin_close"
+            )
+        ])
 
-    keyboard = InlineKeyboardMarkup(keyboard_buttons)
-    await update.message.reply_text(text, reply_markup=keyboard)
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard_buttons)
+    )
 
-
-# ----------------- Ввод счёта через кнопки -----------------
 
 async def start_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    user = update.effective_user
     await query.answer()
 
-    # format: "bet_match_123"
-    _, match_id_s = query.data.split("_", 2)
-    match_id = int(match_id_s)
+    match_id = int(query.data.replace("bet_match_", ""))
 
     context.user_data["active_match_id"] = match_id
     context.user_data["step"] = "await_goals_home"
 
-    # Кнопки 0–7
     keyboard = [
         [KeyboardButton(str(i)) for i in range(0, 4)],
         [KeyboardButton(str(i)) for i in range(4, 8)],
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
     await query.message.reply_text(
-        f"Ставка на матч {match_id}:\n" 
-        "Введите голы первой команды (0–7)",
-        reply_markup=reply_markup
+        f"Ставка на матч {match_id}\nВведи голы первой команды (0–7)",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
     )
 
 
 async def handle_goals_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    try:
-        n = int(text)
-        if n < 0 or n > 7:
-            raise ValueError
-    except ValueError:
+    if not update.message:
+        return
+
+    text = update.message.text.strip()
+
+    if not text.isdigit():
+        return
+
+    n = int(text)
+    if n < 0 or n > 7:
         await update.message.reply_text("Введите цифру от 0 до 7.")
         return
 
@@ -175,21 +200,21 @@ async def handle_goals_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [KeyboardButton(str(i)) for i in range(0, 4)],
             [KeyboardButton(str(i)) for i in range(4, 8)],
         ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
         await update.message.reply_text(
-            f"Голы первой команды: {n}\n"
-            "Теперь введи голы второй команды (0–7)",
-            reply_markup=reply_markup
+            f"Голы первой команды: {n}\nТеперь введи голы второй команды (0–7)",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard,
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
         )
-    elif step == "await_goals_away":
-        context.user_data["goals_away"] = n
-        context.user_data.pop("step", None)
-        context.user_data.pop("active_match_id", None)
+        return
 
-        goals_home = context.user_data["goals_home"]
-        goals_away = context.user_data["goals_away"]
+    if step == "await_goals_away":
+        goals_home = context.user_data.get("goals_home")
+        goals_away = n
 
-        # Сохраняем прогноз
         success = database.save_prediction(
             user.id,
             user.first_name,
@@ -197,47 +222,40 @@ async def handle_goals_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             goals_home,
             goals_away
         )
+
+        context.user_data.clear()
+
         if success:
             await update.message.reply_text(
-                f"⚽ Прогноз принят!\n"
-                f"Счет: {goals_home}:{goals_away}\n"
-                f"Матч ID: {match_id}\n"
-                "Пока он не виден остальным игрокам."
+                f"✅ Прогноз сохранён: {goals_home}:{goals_away}\n"
+                "До закрытия приёма он скрыт от всех."
             )
-        # Если неудачно (например, статус уже closed)
-        # в database.save_prediction будет return False
         else:
             await update.message.reply_text(
-                "❌ Ошибка: сейчас приём прогнозов для этого матча закрыт."
+                "❌ Не удалось сохранить прогноз. Возможно, приём уже закрыт."
             )
 
-
-# ----------------- Закрытие приёма прогнозов -----------------
 
 async def close_predictions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
 
     if user.id != ADMIN_ID:
-        await query.answer("Эта кнопка только для администратора.", show_alert=True)
+        await query.answer("Только для администратора", show_alert=True)
         return
 
-    await query.answer("Приём прогнозов закрыт.")
     database.close_predictions()
-    await query.message.reply_text("🔒 Приём прогнозов на все матчи закрыт.")
+    await query.answer("Приём закрыт")
+    await query.message.reply_text("🔒 Приём прогнозов закрыт.")
 
-
-# ----------------- Команда /set_result (для админа) -----------------
 
 async def cmd_set_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
     if user.id != ADMIN_ID:
-        await update.message.reply_text("Только админ может вводить итоговый счёт.")
+        await update.message.reply_text("Только админ может вводить результат.")
         return
 
-    # Формат: /set_result <match_id> <home> <away>
-    # Например: /set_result 1 3 1
     parts = context.args
     if len(parts) != 3:
         await update.message.reply_text(
@@ -258,27 +276,22 @@ async def cmd_set_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Матч не найден.")
         return
 
-    # Записываем итоговый счёт и помечаем точные прогнозы
     database.set_final_score(match_id, goals_home, goals_away)
-
-    # Получаем прогнозы
     preds = database.get_predictions_for_match(match_id)
 
     result_text = (
         f"Матч: {match['name']}\n"
         f"Итоговый счёт: {goals_home}:{goals_away}\n\n"
-        f"Прогнозы:\n"
+        "Прогнозы:\n"
     )
 
     for p in preds:
         score = f"{p['goals_home']}:{p['goals_away']}"
         marker = "✅" if p["is_correct"] else "❌"
-        result_text += f"@{p['user_name']} – {score} {marker}\n"
+        result_text += f"{p['user_name']} — {score} {marker}\n"
 
     await update.message.reply_text(result_text)
 
-
-# ----------------- Обработчики callback-запросов -----------------
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -289,40 +302,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await close_predictions(update, context)
 
 
-# ----------------- Запуск бота -----------------
+# =========================
+# FASTAPI + WEBHOOK
+# =========================
 
-def main():
-    # Инициализируем базу
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     database.init_db()
 
-    # Создаём приложение
-    application = Application.builder().token(TOKEN).build()
+    await ptb.bot.set_webhook(WEBHOOK_URL)
 
-    # Обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("add_match", cmd_add_match))
-    application.add_handler(CommandHandler("list_matches", cmd_list_matches))
-    application.add_handler(CommandHandler("set_result", cmd_set_result))
-
-    # Обработчик для ввода матчей (текст после /add_match)
-    application.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r".*"), handle_match_input)
-    )
-
-    # Обработчик цифр для ввода счёта
-    application.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(r"^[0-7]$"), handle_goals_input)
-    )
-
-    # Обработчик inline-кнопок
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Запуск
-    logger.info("Запускаем бота...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    async with ptb:
+        await ptb.start()
+        logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+        yield
+        await ptb.stop()
 
 
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    main()
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/")
+async def healthcheck():
+    return {"status": "ok", "message": "Bot is running"}
+
+
+@app.post("/telegram")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, ptb.bot)
+    await ptb.process_update(update)
+    return Response(status_code=HTTPStatus.OK)
+
+
+# =========================
+# РЕГИСТРАЦИЯ ХЕНДЛЕРОВ
+# =========================
+
+ptb.add_handler(CommandHandler("start", start))
+ptb.add_handler(CommandHandler("add_match", cmd_add_match))
+ptb.add_handler(CommandHandler("list_matches", cmd_list_matches))
+ptb.add_handler(CommandHandler("set_result", cmd_set_result))
+ptb.add_handler(CallbackQueryHandler(button_handler))
+
+# Сначала обработчик цифр
+ptb.add_handler(MessageHandler(filters.Regex(r"^[0-7]$"), handle_goals_input))
+# Потом общий текстовый обработчик для /add_match сценария
+ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_match_input))
