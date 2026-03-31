@@ -211,3 +211,27 @@ def get_predictions_for_match(match_id):
             "is_correct": bool(row[4]),
         })
     return predictions
+
+
+def get_matches_closed():
+    """Возвращает закрытые матчи (для показа скрытых прогнозов)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT id, name, sport_type, start_time, status FROM matches "
+        "WHERE status = 'closed' ORDER BY start_time"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    matches = []
+    for row in rows:
+        matches.append({
+            "id": row[0],
+            "name": row[1],
+            "sport_type": row[2],
+            "start_time": row[3],
+            "status": row[4],
+        })
+    return matches
