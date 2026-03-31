@@ -26,8 +26,8 @@ import database
 # НАСТРОЙКИ
 # =========================
 
-TOKEN = "8785410240:AAEzceP8n6AYhgA6Sv5t32Ha8jPgH2MFFa8"  # <-- вставь свой токен
-ADMIN_ID = 396415558  # <-- вставь свой Telegram user_id
+TOKEN = "1234567890:AAAAA-BBBBBB-CCCCCC-........"  # <-- вставь свой токен
+ADMIN_ID = 123456789  # <-- вставь свой Telegram user_id
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", "10000"))
@@ -56,13 +56,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
-            "Я бот для спортивных прогнозов в Шарашкиной конторе.\n"
+            "Я бот для спортивных прогнозов.\n"
             "Ставки принимаются скрытно до закрытия приема.\n\n"
-            "Команды:\n"
-            "/list_matches — показать открытые матчи\n"
-            "/add_match Название | hockey/football | 2026-04-01 19:30 — добавить матч (только админ)\n"
-            "/set_result <match_id> <голы1> <голы2> — внести итоговый счёт (только админ)"
+            "Напиши /help, чтобы увидеть все команды."
         )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    help_text = (
+        "📖 Список команд бота\n\n"
+        "Команды для всех:\n"
+        "/start — запуск бота\n"
+        "/help — показать список команд\n"
+        "/list_matches — показать открытые матчи для прогнозов\n"
+        "/show — показать прогнозы по закрытым матчам\n\n"
+        "Команды администратора:\n"
+        "🔒 /add_match Название матча | hockey/football | 2026-04-01 19:30 — добавить матч\n"
+        "🔒 /set_result <match_id> <голы1> <голы2> — внести итоговый счёт матча\n\n"
+        "Как проходит игра:\n"
+        "1. Админ добавляет матчи.\n"
+        "2. Игроки ставят прогнозы кнопками.\n"
+        "3. Админ закрывает приём прогнозов.\n"
+        "4. После закрытия все могут посмотреть ставки через /show.\n"
+        "5. После завершения матча админ вносит результат через /set_result."
+    )
+
+    await update.message.reply_text(help_text)
 
 
 async def cmd_add_match(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -141,6 +160,46 @@ async def cmd_list_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         text,
         reply_markup=InlineKeyboardMarkup(keyboard_buttons)
     )
+
+
+async def cmd_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    matches = database.get_matches_closed()
+
+    if not matches:
+        await update.message.reply_text(
+            "Сейчас нет закрытых матчей, для которых можно показать прогнозы."
+        )
+        return
+
+    messages = []
+    current_text = "📋 Прогнозы по закрытым матчам:\n\n"
+
+    for match in matches:
+        preds = database.get_predictions_for_match(match["id"])
+
+        block = (
+            f"Матч ID {match['id']}: {match['name']}\n"
+            f"Время: {match['start_time']}\n"
+        )
+
+        if not preds:
+            block += "Прогнозов пока нет.\n\n"
+        else:
+            for p in preds:
+                block += f"- {p['user_name']}: {p['goals_home']}:{p['goals_away']}\n"
+            block += "\n"
+
+        if len(current_text) + len(block) > 3500:
+            messages.append(current_text)
+            current_text = block
+        else:
+            current_text += block
+
+    if current_text.strip():
+        messages.append(current_text)
+
+    for msg in messages:
+        await update.message.reply_text(msg)
 
 
 async def start_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,7 +298,10 @@ async def close_predictions(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     database.close_predictions()
     await query.answer("Приём закрыт")
-    await query.message.reply_text("🔒 Приём прогнозов закрыт.")
+    await query.message.reply_text(
+        "🔒 Приём прогнозов закрыт.\n"
+        "Теперь все участники могут посмотреть прогнозы командой /show"
+    )
 
 
 async def cmd_set_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -337,8 +399,10 @@ async def telegram_webhook(request: Request):
 # =========================
 
 ptb.add_handler(CommandHandler("start", start))
+ptb.add_handler(CommandHandler("help", help_command))
 ptb.add_handler(CommandHandler("add_match", cmd_add_match))
 ptb.add_handler(CommandHandler("list_matches", cmd_list_matches))
+ptb.add_handler(CommandHandler("show", cmd_show))
 ptb.add_handler(CommandHandler("set_result", cmd_set_result))
 ptb.add_handler(CallbackQueryHandler(button_handler))
 ptb.add_handler(MessageHandler(filters.Regex(r"^[0-7]$"), handle_goals_input))
