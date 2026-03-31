@@ -26,8 +26,8 @@ import database
 # НАСТРОЙКИ
 # =========================
 
-TOKEN = "8785410240:AAEzceP8n6AYhgA6Sv5t32Ha8jPgH2MFFa8"  # <-- вставь свой токен
-ADMIN_ID = 396415558  # <-- вставь свой Telegram user_id
+TOKEN = "1234567890:AAAAA-BBBBBB-CCCCCC-........"  # <-- вставь свой токен
+ADMIN_ID = 123456789  # <-- вставь свой Telegram user_id
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", "10000"))
@@ -43,7 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Создаем Telegram Application без polling/updater
+# Создаем приложение Telegram
 ptb = Application.builder().token(TOKEN).updater(None).build()
 
 
@@ -56,65 +56,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
-            "Я бот для спортивных прогнозов.\n"
-            "Ставки принимаются скрытно до закрытия приема."
+            "Я бот для спортивных прогнозов в Шарашкиной конторе.\n"
+            "Ставки принимаются скрытно до закрытия приема.\n\n"
+            "Команды:\n"
+            "/list_matches — показать открытые матчи\n"
+            "/add_match Название | hockey/football | 2026-04-01 19:30 — добавить матч (только админ)\n"
+            "/set_result <match_id> <голы1> <голы2> — внести итоговый счёт (только админ)"
         )
 
 
 async def cmd_add_match(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+
     if user.id != ADMIN_ID:
         await update.message.reply_text("Эта команда только для администратора.")
         return
 
-    context.user_data["step"] = "await_match_name"
+    text = update.message.text.replace("/add_match", "", 1).strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Формат команды:\n"
+            "/add_match Название матча | hockey/football | 2026-04-01 19:30\n\n"
+            "Пример:\n"
+            "/add_match Динамо Минск – СКА | hockey | 2026-04-01 19:30"
+        )
+        return
+
+    parts = [p.strip() for p in text.split("|")]
+
+    if len(parts) != 3:
+        await update.message.reply_text(
+            "Неверный формат.\n"
+            "Нужно так:\n"
+            "/add_match Название матча | hockey/football | 2026-04-01 19:30"
+        )
+        return
+
+    name, sport_type, start_time = parts
+
+    if sport_type not in ["football", "hockey"]:
+        await update.message.reply_text("Вид спорта должен быть: football или hockey")
+        return
+
+    match_id = database.add_match(name, sport_type, start_time)
+
     await update.message.reply_text(
-        "Введи название матча, например:\nРоссия – Чехия, хоккей"
+        f"✅ Матч добавлен.\n"
+        f"ID: {match_id}\n"
+        f"{name}\n"
+        f"{sport_type}\n"
+        f"{start_time}"
     )
-
-
-async def handle_match_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-
-    text = update.message.text.strip()
-    step = context.user_data.get("step")
-
-    if step == "await_match_name":
-        context.user_data["match_name"] = text
-        context.user_data["step"] = "await_sport_type"
-        await update.message.reply_text(
-            "Выбери вид спорта:\n1 – футбол\n2 – хоккей"
-        )
-        return
-
-    if step == "await_sport_type":
-        sport_map = {"1": "football", "2": "hockey"}
-        sport_type = sport_map.get(text)
-
-        if not sport_type:
-            await update.message.reply_text("Выбери 1 или 2.")
-            return
-
-        context.user_data["sport_type"] = sport_type
-        context.user_data["step"] = "await_start_time"
-        await update.message.reply_text(
-            "Введи дату и время в формате:\n2026-03-31 20:00"
-        )
-        return
-
-    if step == "await_start_time":
-        name = context.user_data.get("match_name")
-        sport_type = context.user_data.get("sport_type")
-
-        match_id = database.add_match(name, sport_type, text)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"✅ Матч добавлен.\nID: {match_id}\n{name}\n{text}"
-        )
-        return
 
 
 async def cmd_list_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,13 +303,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def lifespan(_: FastAPI):
     database.init_db()
 
+    await ptb.initialize()
+    await ptb.start()
     await ptb.bot.set_webhook(WEBHOOK_URL)
 
-    async with ptb:
-        await ptb.start()
-        logger.info(f"Webhook установлен: {WEBHOOK_URL}")
-        yield
-        await ptb.stop()
+    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+
+    yield
+
+    await ptb.bot.delete_webhook()
+    await ptb.stop()
+    await ptb.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -344,8 +341,4 @@ ptb.add_handler(CommandHandler("add_match", cmd_add_match))
 ptb.add_handler(CommandHandler("list_matches", cmd_list_matches))
 ptb.add_handler(CommandHandler("set_result", cmd_set_result))
 ptb.add_handler(CallbackQueryHandler(button_handler))
-
-# Сначала обработчик цифр
 ptb.add_handler(MessageHandler(filters.Regex(r"^[0-7]$"), handle_goals_input))
-# Потом общий текстовый обработчик для /add_match сценария
-ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_match_input))
