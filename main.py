@@ -26,8 +26,8 @@ import database
 # НАСТРОЙКИ
 # =========================
 
-TOKEN = "1234567890:AAAAA-BBBBBB-CCCCCC-........"  # <-- вставь свой токен
-ADMIN_ID = 123456789  # <-- вставь свой Telegram user_id
+TOKEN = "8785410240:AAEzceP8n6AYhgA6Sv5t32Ha8jPgH2MFFa8"  # <-- вставь свой токен
+ADMIN_ID = 396415558  # <-- вставь свой Telegram user_id
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", "10000"))
