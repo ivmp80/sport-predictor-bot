@@ -22,16 +22,10 @@ from telegram.ext import (
 
 import database
 
-# =========================
-# НАСТРОЙКИ
-# =========================
-
 TOKEN = "8785410240:AAEzceP8n6AYhgA6Sv5t32Ha8jPgH2MFFa8"  # <-- вставь свой токен
 ADMIN_ID = 396415558  # <-- вставь свой Telegram user_id
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
-PORT = int(os.environ.get("PORT", "10000"))
-
 if not RENDER_EXTERNAL_URL:
     raise ValueError("Не найдена переменная окружения RENDER_EXTERNAL_URL")
 
@@ -43,21 +37,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Создаем приложение Telegram
 ptb = Application.builder().token(TOKEN).updater(None).build()
 
 
-# =========================
-# КОМАНДЫ БОТА
-# =========================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    database.save_user(user.id, user.first_name)
+
     if update.message:
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
-            "Я бот для спортивных прогнозов.\n"
-            "Ставки принимаются скрытно до закрытия приема.\n\n"
+            "Я - бот для спортивных прогнозов в Шарашкиной конторе.\n"
+            "Прогнозы принимаются скрытно до закрытия приема.\n\n"
             "Напиши /help, чтобы увидеть все команды."
         )
 
@@ -69,6 +60,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start — запуск бота\n"
         "/help — показать список команд\n"
         "/list_matches — показать открытые матчи для прогнозов\n"
+        "/players — показать, кто уже поставил прогнозы на открытые матчи\n"
         "/show — показать прогнозы по закрытым матчам\n\n"
         "Команды администратора:\n"
         "🔒 /add_match Название матча | hockey/football | 2026-04-01 19:30 — добавить матч\n"
@@ -76,16 +68,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Как проходит игра:\n"
         "1. Админ добавляет матчи.\n"
         "2. Игроки ставят прогнозы кнопками.\n"
-        "3. Админ закрывает приём прогнозов.\n"
-        "4. После закрытия все могут посмотреть ставки через /show.\n"
-        "5. После завершения матча админ вносит результат через /set_result."
+        "3. Через /players можно посмотреть, кто уже проставился.\n"
+        "4. Админ закрывает приём прогнозов.\n"
+        "5. После закрытия все могут посмотреть ставки через /show.\n"
+        "6. После завершения матча админ вносит результат через /set_result, и итоги приходят всем."
     )
-
     await update.message.reply_text(help_text)
 
 
 async def cmd_add_match(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    database.save_user(user.id, user.first_name)
 
     if user.id != ADMIN_ID:
         await update.message.reply_text("Эта команда только для администратора.")
@@ -130,6 +123,9 @@ async def cmd_add_match(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_list_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    database.save_user(user.id, user.first_name)
+
     matches = database.get_matches_open()
 
     if not matches:
@@ -162,7 +158,52 @@ async def cmd_list_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def cmd_players(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    database.save_user(user.id, user.first_name)
+
+    matches = database.get_matches_open()
+
+    if not matches:
+        await update.message.reply_text("Сейчас нет открытых матчей.")
+        return
+
+    parts = ["👥 Кто уже поставил прогнозы:\n"]
+
+    for match in matches:
+        players = database.get_players_for_match(match["id"])
+        parts.append(f"\nМатч ID {match['id']}: {match['name']}")
+
+        if not players:
+            parts.append("Пока никто не поставил прогноз.")
+        else:
+            for i, p in enumerate(players, start=1):
+                parts.append(f"{i}. {p}")
+
+    text = "\n".join(parts)
+
+    if len(text) <= 4000:
+        await update.message.reply_text(text)
+    else:
+        chunks = []
+        current = ""
+        for line in parts:
+            if len(current) + len(line) + 1 > 3500:
+                chunks.append(current)
+                current = line
+            else:
+                current += ("\n" if current else "") + line
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+
+
 async def cmd_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    database.save_user(user.id, user.first_name)
+
     matches = database.get_matches_closed()
 
     if not matches:
@@ -204,6 +245,9 @@ async def cmd_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    user = update.effective_user
+    database.save_user(user.id, user.first_name)
+
     await query.answer()
 
     match_id = int(query.data.replace("bet_match_", ""))
@@ -243,6 +287,7 @@ async def handle_goals_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     step = context.user_data.get("step")
     match_id = context.user_data.get("active_match_id")
     user = update.effective_user
+    database.save_user(user.id, user.first_name)
 
     if step == "await_goals_home":
         context.user_data["goals_home"] = n
@@ -291,6 +336,7 @@ async def handle_goals_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def close_predictions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
+    database.save_user(user.id, user.first_name)
 
     if user.id != ADMIN_ID:
         await query.answer("Только для администратора", show_alert=True)
@@ -306,6 +352,7 @@ async def close_predictions(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def cmd_set_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    database.save_user(user.id, user.first_name)
 
     if user.id != ADMIN_ID:
         await update.message.reply_text("Только админ может вводить результат.")
@@ -335,17 +382,33 @@ async def cmd_set_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     preds = database.get_predictions_for_match(match_id)
 
     result_text = (
-        f"Матч: {match['name']}\n"
-        f"Итоговый счёт: {goals_home}:{goals_away}\n\n"
-        "Прогнозы:\n"
+        f"🏁 Итоги матча\n"
+        f"{match['name']}\n"
+        f"Счёт: {goals_home}:{goals_away}\n\n"
+        f"Прогнозы игроков:\n"
     )
 
-    for p in preds:
-        score = f"{p['goals_home']}:{p['goals_away']}"
-        marker = "✅" if p["is_correct"] else "❌"
-        result_text += f"{p['user_name']} — {score} {marker}\n"
+    if not preds:
+        result_text += "Прогнозов не было."
+    else:
+        for p in preds:
+            score = f"{p['goals_home']}:{p['goals_away']}"
+            marker = "✅" if p["is_correct"] else "❌"
+            result_text += f"- {p['user_name']} — {score} {marker}\n"
 
-    await update.message.reply_text(result_text)
+    users = database.get_all_users()
+
+    sent_count = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u["user_id"], text=result_text)
+            sent_count += 1
+        except Exception as e:
+            logger.warning(f"Не удалось отправить пользователю {u['user_id']}: {e}")
+
+    await update.message.reply_text(
+        f"Итоги сохранены и отправлены {sent_count} пользователям."
+    )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,10 +419,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "admin_close":
         await close_predictions(update, context)
 
-
-# =========================
-# FASTAPI + WEBHOOK
-# =========================
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -394,14 +453,11 @@ async def telegram_webhook(request: Request):
     return Response(status_code=HTTPStatus.OK)
 
 
-# =========================
-# РЕГИСТРАЦИЯ ХЕНДЛЕРОВ
-# =========================
-
 ptb.add_handler(CommandHandler("start", start))
 ptb.add_handler(CommandHandler("help", help_command))
 ptb.add_handler(CommandHandler("add_match", cmd_add_match))
 ptb.add_handler(CommandHandler("list_matches", cmd_list_matches))
+ptb.add_handler(CommandHandler("players", cmd_players))
 ptb.add_handler(CommandHandler("show", cmd_show))
 ptb.add_handler(CommandHandler("set_result", cmd_set_result))
 ptb.add_handler(CallbackQueryHandler(button_handler))
